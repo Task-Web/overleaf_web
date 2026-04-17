@@ -1,6 +1,21 @@
+x-overleaf-env: &overleaf_env
+  OVERLEAF_APP_NAME: Overleaf
+  OVERLEAF_SITE_URL: "http://overleaf.${HOST_SUFFIX:-localhost}"
+  OVERLEAF_ADMIN_EMAIL: admin@osworld.local
+  OVERLEAF_FIXED_ADMIN_EMAIL: admin@osworld.local
+  OVERLEAF_FIXED_ADMIN_PASSWORD: "OSWorldAdmin123!"
+  OVERLEAF_MONGO_URL: mongodb://overleaf_web_mongo:27017/sharelatex?replicaSet=overleaf
+  MONGO_URL: mongodb://overleaf_web_mongo:27017/sharelatex?replicaSet=overleaf
+  OVERLEAF_REDIS_HOST: overleaf_web_redis
+  REDIS_HOST: overleaf_web_redis
+  OVERLEAF_REDIS_PORT: "6379"
+  REDIS_PORT: "6379"
+  OVERLEAF_TRUSTED_PROXY_IPS: loopback,172.16.0.0/12
+  EMAIL_CONFIRMATION_DISABLED: "true"
+
 services:
   overleaf_web_mongo:
-    image: mongo:8.0
+    image: mongo:8.0.20
     command:
       - mongod
       - --bind_ip_all
@@ -21,7 +36,7 @@ services:
       start_period: 20s
 
   overleaf_web_mongo_init:
-    image: mongo:8.0
+    image: mongo:8.0.20
     depends_on:
       overleaf_web_mongo:
         condition: service_healthy
@@ -37,7 +52,7 @@ services:
       - web
 
   overleaf_web_redis:
-    image: redis:7-alpine
+    image: redis:7.4.8-alpine
     command:
       - redis-server
       - --appendonly
@@ -55,26 +70,112 @@ services:
       timeout: 5s
       retries: 12
 
-  overleaf_web_app:
-    image: sharelatex/sharelatex:latest
+  overleaf_web_admin_bootstrap:
+    image: sharelatex/sharelatex:6.1.2
     depends_on:
       overleaf_web_mongo_init:
         condition: service_completed_successfully
       overleaf_web_redis:
         condition: service_healthy
+    restart: "no"
+    working_dir: /overleaf/services/web
+    entrypoint:
+      - sh
+      - -lc
+      - |
+        node --input-type=module <<'EOF'
+        import Mongoose from '/overleaf/services/web/app/src/infrastructure/Mongoose.mjs'
+        import { connectionPromise as mongoPromise } from '/overleaf/services/web/app/src/infrastructure/mongodb.mjs'
+        import { User } from '/overleaf/services/web/app/src/models/User.mjs'
+        import AuthenticationManager from '/overleaf/services/web/app/src/Features/Authentication/AuthenticationManager.mjs'
+
+        const email = process.env.OVERLEAF_FIXED_ADMIN_EMAIL?.trim().toLowerCase()
+        const password = process.env.OVERLEAF_FIXED_ADMIN_PASSWORD
+
+        if (!email || !password) {
+          throw new Error('fixed Overleaf admin credentials are required')
+        }
+
+        const emailError = AuthenticationManager.validateEmail(email)
+        if (emailError) {
+          throw emailError
+        }
+        const passwordError = AuthenticationManager.validatePassword(password, email)
+        if (passwordError) {
+          throw passwordError
+        }
+
+        await Promise.all([Mongoose.connectionPromise, mongoPromise])
+
+        const now = new Date()
+        const existingUser = await User.findOne({
+          $$or: [{ email }, { 'emails.email': email }],
+        }).exec()
+        const reversedHostname = email.split('@')[1].split('').reverse().join('')
+
+        let user = existingUser
+        if (!user) {
+          user = new User({
+            email,
+            first_name: 'OSWorld',
+            last_name: 'Admin',
+            holdingAccount: false,
+            isAdmin: true,
+            emails: [
+              {
+                email,
+                reversedHostname,
+                createdAt: now,
+                confirmedAt: now,
+              },
+            ],
+          })
+          await user.save()
+        }
+
+        await AuthenticationManager.promises._setUserPasswordInMongo(user, password)
+
+        await User.updateOne(
+          { _id: user._id },
+          {
+            $$set: {
+              email,
+              first_name: user.first_name || 'OSWorld',
+              last_name: user.last_name || 'Admin',
+              holdingAccount: false,
+              isAdmin: true,
+              emails: [
+                {
+                  email,
+                  reversedHostname,
+                  createdAt: user.emails?.[0]?.createdAt || now,
+                  confirmedAt: now,
+                },
+              ],
+            },
+            $$unset: {
+              suspended: true,
+            },
+          }
+        ).exec()
+
+        await Mongoose.disconnect()
+        console.log('Seeded fixed Overleaf admin: ' + email)
+        process.exit(0)
+        EOF
+    environment:
+      <<: *overleaf_env
+    networks:
+      - web
+
+  overleaf_web_app:
+    image: sharelatex/sharelatex:6.1.2
+    depends_on:
+      overleaf_web_admin_bootstrap:
+        condition: service_completed_successfully
     restart: unless-stopped
     environment:
-      OVERLEAF_APP_NAME: Overleaf
-      OVERLEAF_SITE_URL: "http://overleaf.${HOST_SUFFIX:-localhost}"
-      OVERLEAF_ADMIN_EMAIL: admin@localhost
-      OVERLEAF_MONGO_URL: mongodb://overleaf_web_mongo:27017/sharelatex?replicaSet=overleaf
-      MONGO_URL: mongodb://overleaf_web_mongo:27017/sharelatex?replicaSet=overleaf
-      OVERLEAF_REDIS_HOST: overleaf_web_redis
-      REDIS_HOST: overleaf_web_redis
-      OVERLEAF_REDIS_PORT: "6379"
-      REDIS_PORT: "6379"
-      OVERLEAF_TRUSTED_PROXY_IPS: loopback,172.16.0.0/12
-      EMAIL_CONFIRMATION_DISABLED: "true"
+      <<: *overleaf_env
     expose:
       - "80"
     volumes:
