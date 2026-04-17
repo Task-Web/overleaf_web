@@ -1,0 +1,91 @@
+services:
+  overleaf_web_mongo:
+    image: mongo:8.0
+    command:
+      - mongod
+      - --bind_ip_all
+      - --replSet
+      - overleaf
+    restart: unless-stopped
+    expose:
+      - "27017"
+    volumes:
+      - overleaf_web_mongo_data:/data/db
+    networks:
+      - web
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand({ ping: 1 }).ok\" | grep 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  overleaf_web_mongo_init:
+    image: mongo:8.0
+    depends_on:
+      overleaf_web_mongo:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - >
+        mongosh "mongodb://overleaf_web_mongo:27017/admin" --quiet --eval
+        "try { rs.status().ok } catch (e) { rs.initiate({_id:'overleaf',members:[{_id:0,host:'overleaf_web_mongo:27017'}]}).ok }" |
+        grep 1
+    restart: "no"
+    networks:
+      - web
+
+  overleaf_web_redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - yes
+    restart: unless-stopped
+    expose:
+      - "6379"
+    volumes:
+      - overleaf_web_redis_data:/data
+    networks:
+      - web
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  overleaf_web_app:
+    image: sharelatex/sharelatex:latest
+    depends_on:
+      overleaf_web_mongo_init:
+        condition: service_completed_successfully
+      overleaf_web_redis:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      OVERLEAF_APP_NAME: Overleaf
+      OVERLEAF_SITE_URL: "http://overleaf.${HOST_SUFFIX:-localhost}"
+      OVERLEAF_ADMIN_EMAIL: admin@localhost
+      OVERLEAF_MONGO_URL: mongodb://overleaf_web_mongo:27017/sharelatex?replicaSet=overleaf
+      MONGO_URL: mongodb://overleaf_web_mongo:27017/sharelatex?replicaSet=overleaf
+      OVERLEAF_REDIS_HOST: overleaf_web_redis
+      REDIS_HOST: overleaf_web_redis
+      OVERLEAF_REDIS_PORT: "6379"
+      REDIS_PORT: "6379"
+      OVERLEAF_TRUSTED_PROXY_IPS: loopback,172.16.0.0/12
+      EMAIL_CONFIRMATION_DISABLED: "true"
+    expose:
+      - "80"
+    volumes:
+      - overleaf_web_data:/var/lib/overleaf
+    networks:
+      - web
+    labels:
+      caddy: "${CADDY_SCHEME-http://}overleaf.${HOST_SUFFIX:-localhost}"
+      caddy.reverse_proxy: "overleaf_web_app:80"
+
+volumes:
+  overleaf_web_data:
+  overleaf_web_mongo_data:
+  overleaf_web_redis_data:
