@@ -71,7 +71,8 @@ services:
       retries: 12
 
   overleaf_web_admin_bootstrap:
-    image: sharelatex/sharelatex:6.1.2
+    image: sharelatex/sharelatex:6.1.2@sha256:b963fd9b47813c8dc809e6882788b5f332ff00e6acc09f4aa61fdf08d6355772
+    platform: linux/amd64
     depends_on:
       overleaf_web_mongo_init:
         condition: service_completed_successfully
@@ -169,7 +170,10 @@ services:
       - web
 
   overleaf_web_app:
-    image: sharelatex/sharelatex:6.1.2
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
     depends_on:
       overleaf_web_admin_bootstrap:
         condition: service_completed_successfully
