@@ -169,7 +169,7 @@ services:
       - web
 
   overleaf_web_app:
-    image: sharelatex/sharelatex:6.1.2
+    build: .
     depends_on:
       overleaf_web_admin_bootstrap:
         condition: service_completed_successfully
